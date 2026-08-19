@@ -1,0 +1,21 @@
+1. usertrap() called syscall(). The backtrace shows syscall() at frame 0
+   and usertrap() at frame 1.
+
+2. p->trapframe->a7 is 0xf (15). It is the system-call number placed
+   in a7 by the user-space stub; 15 is SYS_open. This is init's call to
+   open("console", O_RDWR).
+
+3. The previous privilege mode was User mode. sstatus was 0x200000022,
+   whose SPP bit (bit 8) is zero.
+
+4. The faulting instruction at sepc 0x80001cf8 was:
+
+       lw a3, 0(zero)
+
+   The compiler kept num in register a3 at this point.
+
+5. The kernel crashed because the instruction tried to load from virtual
+   address 0, which is not mapped in the kernel page table. scause 0xd is
+   a load page fault and stval was 0, confirming that address 0 caused it.
+
+6. The process running at the time of the panic was "init", with PID 1.

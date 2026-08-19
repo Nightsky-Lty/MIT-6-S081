@@ -6,7 +6,16 @@
 int
 main(int argc, char *argv[])
 {
-  // Your code here.
-
-  exit(1);
+    char *p = sbrk(8 * 4096);
+    if(p == SBRK_ERROR)
+        exit(1);
+    for(int i = 0; i < 8 * 4096 - 16; ++i, ++p)
+    {
+        if(strcmp("This may help.", p) == 0)
+        {
+            printf("%s\n", p + 16);
+            exit(0);
+        }
+    }
+    exit(1);
 }
