@@ -65,6 +65,10 @@ void            ireclaim(int);
 // kalloc.c
 void*           kalloc(void);
 void            kfree(void *);
+#ifdef LAB_PGTBL
+void*           superalloc(void);
+void            superfree(void *);
+#endif
 void            kinit(void);
 
 // log.c
