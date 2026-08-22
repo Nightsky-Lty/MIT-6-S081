@@ -1,0 +1,22 @@
+RISC-V assembly
+
+1. Function arguments are passed in registers a0 through a7.  In main's
+   call to printf, a0 contains the format-string address, a1 contains 12,
+   and a2 contains 13.  Thus 13 is in a2.
+
+2. There is no call to f in main: with optimization enabled, f(8)+1 was
+   evaluated at compile time and main loads 12 directly into a1.  There is
+   likewise no call to g in f: f contains addiw a0,a0,3, which is g's body
+   inlined into f.
+
+3. printf is located at address 0x6f6 in user/call.asm.
+
+4. The printf call is at address 0x30.  Its return address, and therefore
+   the value placed in ra immediately after the call, is 0x34.
+
+5. The code prints "He110 World".  57616 is 0xe110, and the little-endian
+   in-memory bytes of i are 0x72, 0x6c, 0x64, 0x00, i.e. the string "rld".
+
+6. On a big-endian RISC-V, set i to 0x726c6400 so its in-memory bytes are
+   still 0x72, 0x6c, 0x64, 0x00.  57616 need not change because printing an
+   integer in hexadecimal is independent of byte order.
