@@ -17,7 +17,29 @@ static uint32 local_ip = MAKE_IP_ADDR(10, 0, 2, 15);
 // qemu host's ethernet address.
 static uint8 host_mac[ETHADDR_LEN] = { 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02 };
 
+#define MAX_PORTS 16
+#define RX_QUEUE_SIZE 16
+
+
 static struct spinlock netlock;
+
+struct net_packet
+{
+  char *buf;
+  int len;
+};
+
+struct net_port
+{
+  int used;
+  uint16 port;
+  struct net_packet queue[RX_QUEUE_SIZE];
+  int head;
+  int tail;
+  int count;
+};
+
+struct net_port ports[MAX_PORTS];
 
 void
 netinit(void)
@@ -34,11 +56,41 @@ netinit(void)
 uint64
 sys_bind(void)
 {
-  //
-  // Your code here.
-  //
+  int dport;
+  int i;
+  argint(0, &dport);
+  acquire(&netlock);
 
-  return -1;
+  if(dport < 0 || dport > 65535)
+  {
+    release(&netlock);
+    return -1;
+  }
+
+  for(i = 0; i < MAX_PORTS; ++i)
+  {
+    if(ports[i].used && ports[i].port == dport)
+    {
+      release(&netlock);
+      return -1;
+    }
+  }
+
+  for(i = 0; i < MAX_PORTS; ++i)
+    if(!ports[i].used) break;
+  if(i == MAX_PORTS)
+  {
+    release(&netlock);
+    return -1;
+  }
+
+  ports[i].head = ports[i].tail = 0;
+  ports[i].port = dport;
+  ports[i].count = 0;
+  ports[i].used = 1;
+  
+  release(&netlock);
+  return 0;
 }
 
 //
@@ -74,10 +126,64 @@ sys_unbind(void)
 uint64
 sys_recv(void)
 {
-  //
-  // Your code here.
-  //
-  return -1;
+  struct proc *p = myproc();
+  int dport;
+  uint64 srcaddr;
+  uint64 sportaddr;
+  uint64 bufaddr;
+  int maxlen;
+  int i;
+
+  argint(0, &dport);
+  argaddr(1, &srcaddr);
+  argaddr(2, &sportaddr);
+  argaddr(3, &bufaddr);
+  argint(4, &maxlen);
+
+  if(dport < 0 || dport > 65535 || maxlen < 0)
+    return -1;
+
+  acquire(&netlock);
+  for(i = 0; i < MAX_PORTS; ++i)
+    if(ports[i].used && ports[i].port == dport)
+      break;
+  if(i == MAX_PORTS)
+  {
+    release(&netlock);
+    return -1;
+  }
+  while(ports[i].count == 0)
+    sleep(&ports[i], &netlock);
+  
+  struct net_packet packet = ports[i].queue[ports[i].head];
+  ports[i].head = (ports[i].head + 1) % RX_QUEUE_SIZE;
+  ports[i].count--;
+
+  release(&netlock);
+
+  struct eth *eth = (struct eth *)packet.buf;
+  struct ip *ip = (struct ip *)(eth + 1);
+  int ip_header_len = (ip->ip_vhl & 0x0f) * 4;
+  struct udp *udp = (struct udp *)((char *)ip + ip_header_len);
+  char *payload = (char *)(udp + 1);
+
+  uint32 src = ntohl(ip->ip_src);
+  uint16 sport = ntohs(udp->sport);
+  int payload_len = ntohs(udp->ulen) - sizeof(struct udp);
+  int copy_len = payload_len;
+  if(copy_len > maxlen)
+    copy_len = maxlen;
+
+  if(copyout(p->pagetable, srcaddr, (char *)&src, sizeof(src)) < 0 ||
+     copyout(p->pagetable, sportaddr, (char *)&sport, sizeof(sport)) < 0 ||
+     copyout(p->pagetable, bufaddr, payload, copy_len) < 0) {
+    kfree(packet.buf);
+    return -1;
+  }
+
+  kfree(packet.buf);
+
+  return copy_len;
 }
 
 // This code is lifted from FreeBSD's ping.c, and is copyright by the Regents
@@ -188,10 +294,67 @@ ip_rx(char *buf, int len)
     printf("ip_rx: received an IP packet\n");
   seen_ip = 1;
 
-  //
-  // Your code here.
-  //
-  
+  if(len < sizeof(struct eth) + sizeof(struct ip)) {
+    kfree(buf);
+    return;
+  }
+
+  struct eth *eth = (struct eth *)buf;
+  struct ip *ip = (struct ip *)(eth + 1);
+
+  int ip_header_len = (ip->ip_vhl & 0x0f) * 4;
+  if((ip->ip_vhl >> 4) != 4 ||
+     ip_header_len < sizeof(struct ip) ||
+     len < sizeof(struct eth) + ip_header_len) {
+    kfree(buf);
+    return;
+  }
+
+  int ip_len = ntohs(ip->ip_len);
+  if(ip_len < ip_header_len + sizeof(struct udp) ||
+     ip_len > len - sizeof(struct eth) ||
+     ntohl(ip->ip_dst) != local_ip ||
+     ip->ip_p != IPPROTO_UDP) {
+    kfree(buf);
+    return;
+  }
+
+  struct udp *udp = (struct udp *)((char *)ip + ip_header_len);
+  int udp_len = ntohs(udp->ulen);
+  if(udp_len < sizeof(struct udp) ||
+     udp_len > ip_len - ip_header_len) {
+    kfree(buf);
+    return;
+  }
+
+  acquire(&netlock);
+
+  uint16 dport = ntohs(udp->dport);
+  for(int i = 0; i < MAX_PORTS; ++i)
+  {
+    if(ports[i].used && ports[i].port == dport)
+    {
+      if(ports[i].count == RX_QUEUE_SIZE)
+      {
+        release(&netlock);
+        kfree(buf);
+        return ;
+      }
+      int tail = ports[i].tail;
+      ports[i].queue[tail].buf = buf;
+      ports[i].queue[tail].len = len;
+      ports[i].count++;
+      ports[i].tail =  (ports[i].tail + 1) % RX_QUEUE_SIZE;
+      wakeup(&ports[i]);
+      release(&netlock);
+      return ; 
+    }
+  }
+
+  release(&netlock);
+  kfree(buf);
+
+  // The validated UDP packet is ready to be queued by destination port.
 }
 
 //

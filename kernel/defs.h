@@ -239,5 +239,9 @@ int             e1000_transmit(char *, int);
 // net.c
 void            netinit(void);
 void            net_rx(char *buf, int len);
+uint64          sys_bind(void);
+uint64          sys_unbind(void);
+uint64          sys_send(void);
+uint64          sys_recv(void);
 
 #endif
