@@ -5,6 +5,7 @@
 //
 
 #include "types.h"
+#include "memlayout.h"
 #include "riscv.h"
 #include "defs.h"
 #include "param.h"
@@ -502,4 +503,176 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr, length, offset;
+  uint64 top, maplen;
+  int prot, flags;
+  int i, slot;
+  struct file *f;
+  struct proc *p;
+  struct vma *vma;
+
+  argaddr(0, &addr);
+  argaddr(1, &length);
+  argint(2, &prot);
+  argint(3, &flags);
+  if(argfd(4, 0, &f) < 0)
+    return -1;
+  argaddr(5, &offset);
+
+  if(addr != 0 || length == 0 || offset != 0)
+    return -1;
+  if(f->type != FD_INODE)
+    return -1;
+  if(flags != MAP_SHARED && flags != MAP_PRIVATE)
+    return -1;
+  if(prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
+    return -1;
+  if((flags & MAP_SHARED) && (prot & PROT_WRITE) && !f->writable)
+    return -1;
+
+  maplen = PGROUNDUP(length);
+  if(maplen < length)
+    return -1;
+
+  p = myproc();
+  for(i = 0; i < NVMA; ++i)
+    if(p->vmas[i].valid == 0)
+      break;
+  if(i == NVMA)
+    return -1;
+  slot = i;
+
+  top = TRAPFRAME;
+  for(i = 0; i < NVMA; ++i)
+    if(p->vmas[i].valid && p->vmas[i].addr < top)
+      top = p->vmas[i].addr;
+  if(top < maplen || top - maplen < PGROUNDUP(p->sz))
+    return -1;
+
+  addr = top - maplen;
+  vma = &p->vmas[slot];
+  vma->addr = addr;
+  vma->length = length;
+  vma->offset = offset;
+  vma->file = filedup(f);
+  vma->prot = prot;
+  vma->valid = 1;
+  vma->flags = flags;
+
+  return addr;
+}
+
+int
+munmap_vma(struct proc *p, struct vma *vma, uint64 addr, uint64 length)
+{
+  uint64 va, maplen, vma_end, unmap_end;
+  pte_t *pte;
+  int entire;
+
+  maplen = PGROUNDUP(length);
+  if(length == 0 || maplen < length || addr % PGSIZE)
+    return -1;
+  if(addr + maplen < addr || vma == 0 || !vma->valid)
+    return -1;
+
+  vma_end = vma->addr + PGROUNDUP(vma->length);
+  unmap_end = addr + maplen;
+  if(addr < vma->addr || unmap_end > vma_end)
+    return -1;
+  if(addr != vma->addr && unmap_end != vma_end)
+    return -1;
+  entire = addr == vma->addr && unmap_end == vma_end;
+
+  for(va = addr; va < unmap_end; va += PGSIZE)
+  {
+    pte = walk(p->pagetable, va, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0)
+      continue;
+
+    if(vma->flags == MAP_SHARED && (vma->prot & PROT_WRITE))
+    {
+      uint64 pageoff = va - vma->addr;
+      uint64 fileoff = vma->offset + pageoff;
+      uint n = PGSIZE;
+      
+      begin_op();
+      ilock(vma->file->ip);
+
+      if(pageoff >= vma->length || fileoff >= vma->file->ip->size)
+        n = 0;
+      else
+      {
+        if(pageoff + n > vma->length)
+          n = vma->length - pageoff;
+        if(fileoff + n > vma->file->ip->size)
+          n = vma->file->ip->size - fileoff;  
+      }
+
+      if(n > 0)
+      {
+        uint64 pa = PTE2PA(*pte);
+        int r = writei(vma->file->ip, 0, pa, fileoff, n);
+        iunlock(vma->file->ip);
+        end_op();
+        if(r != n)
+          return -1;
+      }
+      else
+      {
+        iunlock(vma->file->ip);
+        end_op();
+      }
+    }
+  }
+
+  for(va = addr; va < unmap_end; va += PGSIZE)
+    uvmunmap(p->pagetable, va, 1, 1);
+
+  if(entire)
+  {
+    fileclose(vma->file);
+    vma->file = 0;
+    vma->valid = 0;
+  }
+  else if(addr == vma->addr)
+  {
+    vma->length -= maplen;
+    vma->offset += maplen;
+    vma->addr += maplen;
+  }
+  else
+    vma->length = addr - vma->addr;
+  return 0;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr, length, maplen;
+  struct proc *p = myproc();
+  int i;
+
+  argaddr(0, &addr);
+  argaddr(1, &length);
+  maplen = PGROUNDUP(length);
+  if(length == 0 || maplen < length || addr % PGSIZE || addr + maplen < addr)
+    return -1;
+
+  for(i = 0; i < NVMA; ++i)
+  {
+    struct vma *vma = &p->vmas[i];
+    uint64 vma_end;
+
+    if(!vma->valid)
+      continue;
+    vma_end = vma->addr + PGROUNDUP(vma->length);
+    if((addr == vma->addr || addr + maplen == vma_end) && addr >= vma->addr && addr + maplen <= vma_end)
+      return munmap_vma(p, vma, addr, length);
+  }
+  return -1;
 }

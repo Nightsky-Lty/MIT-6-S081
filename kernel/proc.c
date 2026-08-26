@@ -291,6 +291,13 @@ kfork(void)
 
   release(&np->lock);
 
+  for(i = 0; i < NVMA; ++i)
+  {
+    np->vmas[i] = p->vmas[i];
+    if(p->vmas[i].valid)
+      np->vmas[i].file = filedup(np->vmas[i].file);
+  }
+
   acquire(&wait_lock);
   np->parent = p;
   release(&wait_lock);
@@ -324,6 +331,7 @@ void
 kexit(int status)
 {
   struct proc *p = myproc();
+  struct vma *vma;
 
   if(p == initproc)
     panic("init exiting");
@@ -335,6 +343,12 @@ kexit(int status)
       fileclose(f);
       p->ofile[fd] = 0;
     }
+  }
+  for(int i = 0; i < NVMA; ++i)
+  {
+    vma = &p->vmas[i];
+    if(p->vmas[i].valid)
+      munmap_vma(p, vma, vma->addr, vma->length);
   }
 
   begin_op();
